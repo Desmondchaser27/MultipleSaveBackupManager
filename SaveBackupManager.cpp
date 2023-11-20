@@ -20,7 +20,8 @@
 
 //Ignore some deprecation warnings
 
-bool compareTimestamps(const std::string& path1, const std::string& path2);
+bool compareTimestamps_Strs(const std::string& path1, const std::string& path2);
+bool compareTimestamps_Paths(const std::filesystem::path& path1, const std::filesystem::path& path2);
 std::string GetCurrentDateTimeAsString();
 
 
@@ -89,6 +90,14 @@ int main()
     SetConsoleCtrlHandler(onConsoleEvent, TRUE);    // Handle Console Window closing
 
     
+    //Right away set focus so user input can go straight to the console without needing to click (hey, they opened the app...).
+    HWND consoleWindow = GetConsoleWindow();
+    if (consoleWindow != NULL)
+    {
+        SetFocus(consoleWindow);
+    }
+
+
     //==========================================================
     //  Load savefolders.ini config file
     //==========================================================
@@ -144,7 +153,7 @@ int main()
     //==========================================================
 
     //NEED TO UPDATE THIS WHEN WE ADD MORE OPTIONS.
-    int max_options = 4;
+    int max_options = 5;
 
     while (!exit_program)
     {
@@ -153,7 +162,8 @@ int main()
                      "1. Choose a new folder to add to the managed save backups list." << std::endl <<
                      "2. List all backup games and their paths." << std::endl <<
                      "3. Backup all new saves." << std::endl <<
-                     "4. Exit program." << std::endl <<
+                     "4. Overwrite a game save with a save backup (Current save is backed up where it's located, just in case)." << std::endl <<
+                     "5. Exit program." << std::endl <<
                      std::endl;
 
         std::string userInput;
@@ -196,6 +206,14 @@ int main()
                 nfdchar_t* save_path = NULL;
                 std::string file_result_text;
                 nfdresult_t result = NFD_PickFolder(NULL, &save_path);
+
+                //Set the console as the front window in Windows when the user is done with the folder select dialog.
+                //Also set focus so they don't have to click to type.
+                HWND consoleWindow = GetConsoleWindow();
+                if (consoleWindow != NULL) {
+                    SetForegroundWindow(consoleWindow);
+                    SetFocus(consoleWindow);
+                }
 
                 if (result == NFD_OKAY)
                 {
@@ -334,10 +352,10 @@ int main()
                         }
                     }
 
-                    std::sort(backup_folder_paths.begin(), backup_folder_paths.end(), compareTimestamps);
+                    std::sort(backup_folder_paths.begin(), backup_folder_paths.end(), compareTimestamps_Strs);
 
-                    //If count >= save limit, remove earliest ones until we have save_limit - 1 (b/c need to make new one)
-                    if (count > backup_save_limit)
+                    //If amount of backups >= save limit, remove earliest ones until we have save_limit - 1 (b/c need to make new one)
+                    if (count + 1 > backup_save_limit)
                     {
                         for (auto path : backup_folder_paths)
                         {
@@ -363,7 +381,7 @@ int main()
 
                         //Make root directory of save folder
                         std::string save_dir = std::filesystem::relative(actual_save_path, actual_save_path.parent_path()).generic_string();
-                        std::filesystem::path backup_final_directory(backup_path.generic_string() + "/" + save_dir);
+                        std::filesystem::path backup_final_directory(backup_path.string() + "/" + save_dir);
                         std::filesystem::create_directories(backup_final_directory);
 
                         //Attempt to back up the save data inside the root save folder.
@@ -453,9 +471,296 @@ int main()
             }
 
             //==========================================================
-            //  Exit the program
+            //  Overwrite an existing save with a backup save
             //==========================================================
             case 4:
+            {
+                //First let's display the game list for the user to choose from.
+
+                bool inputValid = false;
+                int numberChoice = 0;
+                std::vector<std::string> save_game_names;
+
+                //Get list of game names
+                int count = 1;
+                for (auto entry : save_paths)
+                {
+                    save_game_names.push_back(entry.first);
+                    count++;
+                }
+
+                while (!inputValid)
+                {
+                    std::cout << std::endl;
+
+                    std::cout << "Choose a game in which to overwrite it's current save:" << std::endl <<
+                                 "------------------------------------------------------" << std::endl;
+
+                    int num = 1;
+                    for (auto game_name : save_game_names)
+                    {
+                        std::cout << num << ". " << game_name << std::endl;
+                        num++;
+                    }
+
+                    //Last choice is always to cancel.
+                    std::cout << count << ". [Cancel overwrite operation]" << std::endl;
+
+                    std::cout << std::endl;
+
+                    std::string userChoice;
+                    std::getline(std::cin >> std::ws, userChoice);
+
+                    try
+                    {
+                        numberChoice = std::stoi(userChoice);
+                    }
+                    catch (const std::exception& ex)
+                    {
+                        system("cls");
+                        std::cerr << "Invalid input, '" << userChoice << "'." << std::endl;
+                        std::cerr << "Enter a number corresponding to one of the options." << std::endl;
+                        std::cout << "\n";
+                        continue;
+                    }
+
+                    if (numberChoice <= 0 || numberChoice > save_game_names.size() + 1)
+                    {
+                        system("cls");
+                        std::cerr << "Invalid input, '" << userChoice << "'." << std::endl;
+                        std::cerr << "Enter a number corresponding to one of the options." << std::endl;
+                        std::cout << "\n";
+                        continue;
+                    }
+
+                    inputValid = true;
+                }
+
+                //Exit this switch case if the "Cancel" choice was selected.
+                if (numberChoice == save_game_names.size() + 1)
+                {
+                    system("cls");
+                    break;
+                }
+
+
+                //Then let's backup the existing save for the game chosen at the dir right before the location of the current save
+                std::string game_name = save_game_names[numberChoice - 1];
+                std::filesystem::path game_save_path(save_paths[game_name]);
+                std::filesystem::path parent_path = game_save_path.parent_path();
+
+                std::filesystem::path backup_current_save_path(parent_path.string() + "/" + "CurrentSaveBackup");
+
+                bool overwrite_current_save_backup = false;
+                if (!std::filesystem::exists(backup_current_save_path))
+                {
+                    std::filesystem::create_directory(backup_current_save_path);
+                    overwrite_current_save_backup = true;
+                }
+                else
+                {
+                    //Ask if user wants to overwrite an existing current save backup
+                    std::string userChoiceInput = "";
+
+                    while (userChoiceInput != "y" && userChoiceInput != "n")
+                    {
+                        std::cout << std::endl;
+                        std::cout << "There exists a current_save backup folder already. Are you sure you want to overwrite this save? (y/n) -> ";
+
+                        std::getline(std::cin >> std::ws, userChoiceInput);
+
+                        if (userChoiceInput == "n")
+                        {
+                            //Cancel overwrite, but still allows writing backup.
+                            break;
+                        }
+                        else if (userChoiceInput != "y")
+                        {
+                            system("cls");
+                            std::cerr << "Please enter a correct answer." << std::endl;
+                            std::cout << std::endl;
+                        }
+                    }
+                }
+
+                //Just to space stuff out a bit more.
+                std::cout << std::endl;
+
+                //If we got here, then user selected "y" they want to overwrite current save backup OR it didn't exist before
+                //So we should go ahead and write/overwrite the current save backup
+
+                //Make root directory of save folder
+                std::string save_dir = std::filesystem::relative(game_save_path, game_save_path.parent_path()).string();
+                std::filesystem::path backup_current_save_final_directory(backup_current_save_path.string() + "/" + save_dir);
+                std::filesystem::create_directories(backup_current_save_final_directory);
+
+                //TODO: Need to make sure that the save directory actually exists anymore first?
+                for (const auto& entry : std::filesystem::recursive_directory_iterator(game_save_path))
+                {
+                    const std::filesystem::path& currentPath = entry.path();
+                    const std::filesystem::path relativePath = std::filesystem::relative(currentPath, game_save_path);
+                    const std::filesystem::path destinationPath = backup_current_save_final_directory / relativePath;
+
+                    try
+                    {
+                        if (std::filesystem::is_directory(entry.status())) {
+                            std::filesystem::create_directories(destinationPath);
+                        }
+                        else if (std::filesystem::is_regular_file(entry.status())) {
+                            std::filesystem::copy_file(currentPath, destinationPath, std::filesystem::copy_options::overwrite_existing);
+                        }
+                    }
+                    catch (const std::exception& e)
+                    {
+
+                        //if we failed to do so, remove the backup folder we created and all data we tried to backup there
+                        std::cerr << "Error copying file " << currentPath << ": " << e.what() << std::endl;
+                        std::cout << std::endl;
+                        std::cout << "Deleting backup that was attempted..." << std::endl;
+
+                        std::filesystem::remove_all(backup_current_save_path);
+
+                        std::cout << "Deleted incomplete backup data." << std::endl;
+                        break;
+                    }
+                }
+
+                //Then let's pull up a list of the backups for that game for the user to choose from                
+                //Count how many backups exist already
+                int backup_folder_count = 0;
+                std::filesystem::path backup_folder = "./Backups/" + game_name;
+                std::string backup_name = "Backup";
+                std::vector<std::filesystem::path> backup_folder_paths;
+
+                for (const auto& entry : std::filesystem::directory_iterator(backup_folder))
+                {
+                    if (std::filesystem::is_directory(entry))
+                    {
+                        // Check if the substring exists in the directory name
+                        if (entry.path().filename().string().find(backup_name) != std::string::npos)
+                        {
+                            backup_folder_paths.push_back(entry.path());
+                            backup_folder_count++;
+                        }
+                    }
+                }
+
+                std::sort(backup_folder_paths.begin(), backup_folder_paths.end(), compareTimestamps_Paths);
+
+                std::string hyphens_from_name_size = "";
+                for (int i = 0; i < game_name.length(); i++)
+                {
+                    hyphens_from_name_size.push_back('-');
+                }
+
+                bool validInput = false;
+                int integerChoice = 0;
+                while (!validInput)
+                {
+                    int backup_count = 0;  //reset so we don't keep adding these.
+
+                    std::cout << "Select a game backup save from \"" << game_name << "\" to restore." << std::endl <<
+                        "--------------------------------------------" << hyphens_from_name_size << std::endl;
+
+                    for (const auto& backup : backup_folder_paths)
+                    {
+                        std::cout << backup_count + 1 << ". " << backup.filename().string() << std::endl;
+                        backup_count++;
+                    }
+
+                    //Last choice is always to cancel.
+                    std::cout << backup_count + 1 << ". [Cancel restore operation]" << std::endl;
+
+                    std::cout << std::endl;
+
+                    std::string userChoice;
+                    std::getline(std::cin >> std::ws, userChoice);
+
+                    try
+                    {
+                        integerChoice = std::stoi(userChoice);
+                    }
+                    catch (const std::exception& ex)
+                    {
+                        system("cls");
+                        std::cerr << "Invalid input, '" << userChoice << "'." << std::endl;
+                        std::cerr << "Enter a number corresponding to one of the options." << std::endl;
+                        std::cout << "\n";
+                        continue;
+                    }
+
+                    if (integerChoice <= 0 || integerChoice > backup_count + 1)
+                    {
+                        system("cls");
+                        std::cerr << "Invalid input, '" << userChoice << "'." << std::endl;
+                        std::cerr << "Enter a number corresponding to one of the options." << std::endl;
+                        std::cout << "\n";
+                        continue;
+                    }
+
+                    validInput = true;
+                }
+
+                //Handle cancel choice potentially first
+                if (integerChoice == backup_folder_paths.size() + 1)
+                {
+                    system("cls");
+                    break;
+                }
+
+
+                //Finally, overwrite the current save with their backup selection
+                //TODO: Also make this step actually happen.
+
+                std::filesystem::path backup_path_selected = backup_folder_paths[integerChoice - 1];
+
+                //Make sure we're restoring in the PLACE where the save data is stored, not the folder selected for save data, since we backed up that too.
+                const std::filesystem::path game_dir_to_overwrite_save = game_save_path.parent_path();
+
+                for (const auto& entry : std::filesystem::recursive_directory_iterator(backup_path_selected))
+                {
+                    const std::filesystem::path& currentPath = entry.path();
+                    const std::filesystem::path relativePath = std::filesystem::relative(currentPath, backup_path_selected);
+                    const std::filesystem::path destinationPath = game_dir_to_overwrite_save / relativePath;
+
+                    try
+                    {
+                        if (std::filesystem::is_directory(entry.status()))
+                        {
+                            std::filesystem::create_directories(destinationPath);
+                        }
+                        else if (std::filesystem::is_regular_file(entry.status()))
+                        {
+                            std::filesystem::copy_file(currentPath, destinationPath, std::filesystem::copy_options::overwrite_existing);
+                        }
+                    }
+                    catch (const std::exception& e)
+                    {
+
+                        //if we failed to do so... until I write file/folder restoration do nothing. (probably need a better process)
+                        std::cerr << "Error copying file " << currentPath << ": " << e.what() << std::endl;
+                        std::cout << std::endl;
+                        std::cout << "Deleting backup that was attempted..." << std::endl;
+
+                        std::cout << "Deleted incomplete backup data." << std::endl;
+                        break;
+                    }
+                }
+
+                //Let user know everything went okay
+
+                //TODO: Make this also say which backup data was chosen to overwrite.
+                //TODO: Oh and ALSO, this doesn't currently actual overwrite anything yet, just backs up current save.
+                system("cls");
+                std::cout << "Current save data for \"" << game_name << "\" was successfully overwritten." << std::endl;
+                std::cout << std::endl;
+                break;
+            }
+
+            //==========================================================
+            //  Exit the program
+            //==========================================================
+            case 5:
             {
                 exit_program = true;
                 system("cls");
@@ -499,7 +804,7 @@ std::string GetCurrentDateTimeAsString() {
     return ss.str();
 }
 
-bool compareTimestamps(const std::string& path1, const std::string& path2) {
+bool compareTimestamps_Strs(const std::string& path1, const std::string& path2) {
     // Extract timestamps from the paths
     auto extractTimestamp = [](const std::string& path) {
         std::tm timestamp = {};
@@ -513,4 +818,20 @@ bool compareTimestamps(const std::string& path1, const std::string& path2) {
 
     // Compare timestamps
     return extractTimestamp(path1) < extractTimestamp(path2);
+}
+
+bool compareTimestamps_Paths(const std::filesystem::path& path1, const std::filesystem::path& path2) {
+    // Extract timestamps from the paths
+    auto extractTimestamp = [](const std::string& path) {
+        std::tm timestamp = {};
+        sscanf_s(path.c_str(), "Backup - %d-%d-%d %dh%dm%ds",
+            &timestamp.tm_year, &timestamp.tm_mon, &timestamp.tm_mday,
+            &timestamp.tm_hour, &timestamp.tm_min, &timestamp.tm_sec);
+        timestamp.tm_year -= 1900; // Adjust year
+        timestamp.tm_mon -= 1;    // Adjust month
+        return std::mktime(&timestamp);
+        };
+
+    // Compare timestamps
+    return extractTimestamp(path1.string()) < extractTimestamp(path2.string());
 }
